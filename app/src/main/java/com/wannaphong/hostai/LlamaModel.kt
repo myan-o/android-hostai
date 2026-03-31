@@ -20,12 +20,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock as mutexWithLock
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -54,24 +55,25 @@ class LlamaModel(
 ) {
     private var modelName = "litert-model"
     private var modelPath: String? = null
-    private var isLoaded = false
+    @Volatile private var isLoaded = false
     
     // LiteRT components
-    private var engine: Engine? = null
+    @Volatile private var engine: Engine? = null
     private val conversations = ConcurrentHashMap<String, Conversation>()
     private val scope = CoroutineScope(Dispatchers.IO)
     
-    // Per-session locks for thread-safe concurrent request handling
-    // Ensures requests to the same session are processed sequentially
-    // while requests to different sessions can run in parallel
-    //
-    // Implementation note: Locks are used inside coroutines on the IO dispatcher.
-    // This is acceptable because:
-    // 1. The IO dispatcher is designed for blocking operations
-    // 2. We're only blocking during actual model inference (the primary work)
-    // 3. Each coroutine runs on a separate thread from the IO thread pool
-    // 4. The alternative (channels/mutexes) would add complexity without benefit
-    private val sessionLocks = ConcurrentHashMap<String, ReentrantLock>()
+    // Global coroutine Mutex to serialise Engine.createConversation() calls.
+    // The LiteRT engine may not safely support concurrent conversation creation
+    // from multiple coroutines. Using a coroutine Mutex avoids blocking IO
+    // dispatcher threads while waiting for the lock.
+    private val engineCreationLock = Mutex()
+    
+    // Per-session coroutine Mutexes for thread-safe concurrent request handling.
+    // Using kotlinx.coroutines.sync.Mutex allows the lock to be held across
+    // coroutine suspension points (e.g. during streaming via sendMessageAsync),
+    // which prevents two concurrent requests for the same session from using
+    // the same Conversation object simultaneously.
+    private val sessionMutexes = ConcurrentHashMap<String, Mutex>()
     
     // Cache SettingsManager to avoid repeated instantiation
     private val settingsManager by lazy { SettingsManager(context) }
@@ -82,6 +84,9 @@ class LlamaModel(
         private const val DEFAULT_SESSION_ID = "default"
         // Delay between streaming token emissions (in milliseconds)
         private const val TOKEN_EMISSION_DELAY_MS = 10L
+        // Conversation creation retry settings
+        private const val CONVERSATION_CREATION_MAX_ATTEMPTS = 2
+        private const val CONVERSATION_CREATION_RETRY_DELAY_MS = 200L
     }
     
     fun loadModel(modelPath: String): Boolean {
@@ -155,84 +160,126 @@ class LlamaModel(
     fun getModelPath(): String? = modelPath
     
     /**
-     * Get or create a lock for the given session ID.
-     * Ensures thread-safe concurrent access per session.
+     * Get or create a Mutex for the given session ID.
+     * Used by all generation operations so the lock can be held
+     * across coroutine suspension points (e.g. during sendMessageAsync).
      * @param sessionId Unique identifier for the session
-     * @return A ReentrantLock for the session
+     * @return A kotlinx.coroutines Mutex for the session
      */
-    private fun getSessionLock(sessionId: String): ReentrantLock {
-        return sessionLocks.computeIfAbsent(sessionId) { ReentrantLock() }
+    private fun getSessionMutex(sessionId: String): Mutex {
+        return sessionMutexes.computeIfAbsent(sessionId) { Mutex() }
     }
-    
+
     /**
      * Get or create a conversation for the given session ID.
-     * Thread-safe atomic operation using computeIfAbsent.
+     * Thread-safe: Uses engineCreationMutex to serialise Engine.createConversation()
+     * calls, which may not be safe to invoke concurrently. Retries once after a
+     * short delay to recover from transient GPU/CPU initialisation failures.
      * @param sessionId Unique identifier for the conversation session
      * @param config Sampler configuration for the conversation
      * @return The conversation instance, or null if creation fails
      */
-    private fun getOrCreateConversation(sessionId: String, config: GenerationConfig): Conversation? {
-        return try {
-            conversations.computeIfAbsent(sessionId) { _ ->
-                val currentEngine = engine ?: throw IllegalStateException("Engine is not initialized")
-                
-                val samplerConfig = SamplerConfig(
-                    topK = config.topK,
-                    topP = config.topP,
-                    temperature = config.temperature
-                )
-                
-                // Log extra context if provided (for debugging/future support)
-                if (config.extraContext?.isNotEmpty() == true) {
-                    LogManager.d(TAG, "Extra context provided: ${config.extraContext}")
-                }
-                
-                // Build conversation config
-                val conversationConfig = ConversationConfig(
-                    systemInstruction = null,
-                    initialMessages = emptyList(),
-                    samplerConfig = samplerConfig
-                )
-                
-                val newConversation = currentEngine.createConversation(conversationConfig)
-                
-                LogManager.i(TAG, "Created new conversation for session: $sessionId")
-                newConversation
-            }
-        } catch (e: Exception) {
-            LogManager.e(TAG, "Failed to create conversation for session $sessionId", e)
-            // Note: computeIfAbsent won't insert the key if the function throws an exception
-            // So we don't need to remove anything - the map remains unchanged
-            null
+    private suspend fun getOrCreateConversation(sessionId: String, config: GenerationConfig): Conversation? {
+        // Fast path: conversation already exists
+        conversations[sessionId]?.let { return it }
+
+        // Log extra context if provided (for debugging/future support)
+        if (config.extraContext?.isNotEmpty() == true) {
+            LogManager.d(TAG, "Extra context provided: ${config.extraContext}")
         }
+
+        // Slow path: create a new conversation with a single retry.
+        // engineCreationLock serialises concurrent creation calls so the LiteRT engine
+        // is not accessed by multiple coroutines at the same time during initialisation.
+        for (attempt in 0 until CONVERSATION_CREATION_MAX_ATTEMPTS) {
+            if (attempt > 0) {
+                // Suspend (not block) before the retry to give the engine time to
+                // recover from transient GPU/CPU initialisation failures.
+                delay(CONVERSATION_CREATION_RETRY_DELAY_MS)
+            }
+
+            val conversation = try {
+                engineCreationLock.mutexWithLock {
+                    // Re-check inside the lock: a concurrent coroutine may have
+                    // already created the conversation while we were waiting.
+                    val existing = conversations[sessionId]
+                    if (existing != null) return existing
+
+                    val currentEngine = engine
+                        ?: throw IllegalStateException("Engine is not initialized")
+
+                    val samplerConfig = SamplerConfig(
+                        topK = config.topK,
+                        topP = config.topP,
+                        temperature = config.temperature
+                    )
+
+                    // Use an empty string instead of null for systemInstruction.
+                    // Some LiteRT versions throw a NullPointerException when null is
+                    // passed through the JNI boundary.  An empty string is treated as
+                    // "no system instruction" by the model, so the behaviour is the same
+                    // while avoiding the NPE risk.
+                    val conversationConfig = ConversationConfig(
+                        systemInstruction = "",
+                        initialMessages = emptyList(),
+                        samplerConfig = samplerConfig
+                    )
+
+                    currentEngine.createConversation(conversationConfig)
+                }
+            } catch (e: Exception) {
+                LogManager.w(TAG, "Conversation creation attempt ${attempt + 1} failed for session '$sessionId': ${e.message}")
+                null
+            }
+
+            if (conversation != null) {
+                // putIfAbsent handles the race where two coroutines created a
+                // conversation for the same session concurrently; whichever loses
+                // closes its instance and uses the winner's.
+                val winner = conversations.putIfAbsent(sessionId, conversation)
+                if (winner != null) {
+                    // Another coroutine won the race.  Close our duplicate and use theirs.
+                    try { conversation.close() } catch (e: Exception) {
+                        LogManager.w(TAG, "Error closing duplicate conversation for session '$sessionId'", e)
+                    }
+                    return winner
+                }
+                LogManager.i(TAG, "Created new conversation for session '$sessionId' (attempt ${attempt + 1})")
+                return conversation
+            }
+        }
+
+        LogManager.e(TAG, "Failed to create conversation for session '$sessionId' after $CONVERSATION_CREATION_MAX_ATTEMPTS attempts")
+        return null
     }
     
     /**
      * Clear a specific conversation session.
-     * Thread-safe: Acquires the session lock to ensure no concurrent operations.
+     * Thread-safe: Acquires the session Mutex to ensure no concurrent operations.
      * @param sessionId The session ID to clear
      * @return true if the session was found and cleared, false otherwise
      */
     fun clearSession(sessionId: String): Boolean {
-        // Get the lock for this session (create if doesn't exist)
-        val lock = getSessionLock(sessionId)
-        
-        // Acquire lock to prevent concurrent access during cleanup
-        return lock.withLock {
-            // Remove both conversation and lock while holding the lock
-            val conversation = conversations.remove(sessionId)
-            sessionLocks.remove(sessionId)
-            
-            if (conversation != null) {
-                LogManager.i(TAG, "Clearing conversation session: $sessionId")
-                try {
-                    conversation.close()
-                } catch (e: Exception) {
-                    LogManager.e(TAG, "Error closing conversation for session $sessionId", e)
+        val mutex = getSessionMutex(sessionId)
+        // runBlocking bridges this non-suspend function with the suspend Mutex API.
+        // clearSession() is called from non-coroutine contexts (e.g. HTTP handlers,
+        // lifecycle callbacks), so blocking the calling thread briefly is acceptable.
+        return runBlocking {
+            mutex.mutexWithLock {
+                val conversation = conversations.remove(sessionId)
+                sessionMutexes.remove(sessionId)
+
+                if (conversation != null) {
+                    LogManager.i(TAG, "Clearing conversation session: $sessionId")
+                    try {
+                        conversation.close()
+                    } catch (e: Exception) {
+                        LogManager.e(TAG, "Error closing conversation for session $sessionId", e)
+                    }
+                    true
+                } else {
+                    false
                 }
-                true
-            } else {
-                false
             }
         }
     }
@@ -253,8 +300,8 @@ class LlamaModel(
             }
             iterator.remove()
         }
-        // Clear all session locks
-        sessionLocks.clear()
+        // Clear all session mutexes
+        sessionMutexes.clear()
     }
     
     /**
@@ -292,30 +339,36 @@ class LlamaModel(
             return "This is a mock response from the model (session: $sessionId). In production, this would be the actual LLM output for prompt: \"$promptPreview\""
         }
         
-        // Use per-session lock to ensure thread-safe access
-        val lock = getSessionLock(sessionId)
-        return lock.withLock {
-            try {
-                // Get or create conversation for this session
-                val sessionConversation = getOrCreateConversation(sessionId, config)
-                
-                if (sessionConversation == null) {
-                    val errorMsg = "Error: Failed to create conversation for session '$sessionId'"
-                    LogManager.e(TAG, errorMsg)
-                    return@withLock errorMsg
+        // Use per-session Mutex to ensure thread-safe access.
+        // NOTE: runBlocking bridges this non-suspend function (called by the Javalin
+        // HTTP handler) with the suspend world.  The Javalin handler already runs on a
+        // dedicated IO thread, so blocking it here is equivalent to ordinary blocking IO.
+        // Refactoring the handlers to be fully coroutine-native would remove this call.
+        val mutex = getSessionMutex(sessionId)
+        return runBlocking {
+            mutex.mutexWithLock {
+                try {
+                    // Get or create conversation for this session
+                    val sessionConversation = getOrCreateConversation(sessionId, config)
+
+                    if (sessionConversation == null) {
+                        val errorMsg = "Error: Failed to create conversation for session '$sessionId'"
+                        LogManager.e(TAG, errorMsg)
+                        return@mutexWithLock errorMsg
+                    }
+
+                    // Send message and get response synchronously
+                    val userMessage = Message.user(prompt)
+                    val response = sessionConversation.sendMessage(userMessage)
+
+                    val result = response.toString()
+                    LogManager.i(TAG, "Generation completed successfully for session '$sessionId' (length: ${result.length})")
+                    result
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to generate response for session '$sessionId'", e)
+                    LogManager.e(TAG, "Failed to generate response: ${e.message}", e)
+                    "Error: ${e.message}"
                 }
-                
-                // Send message and get response synchronously
-                val userMessage = Message.user(prompt)
-                val response = sessionConversation.sendMessage(userMessage)
-                
-                val result = response.toString()
-                LogManager.i(TAG, "Generation completed successfully for session '$sessionId' (length: ${result.length})")
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to generate response for session '$sessionId'", e)
-                LogManager.e(TAG, "Failed to generate response: ${e.message}", e)
-                "Error: ${e.message}"
             }
         }
     }
@@ -344,30 +397,34 @@ class LlamaModel(
             return "This is a mock multimodal response from the model (session: $sessionId) with ${contents.size} content parts."
         }
         
-        // Use per-session lock to ensure thread-safe access
-        val lock = getSessionLock(sessionId)
-        return lock.withLock {
-            try {
-                // Get or create conversation for this session
-                val sessionConversation = getOrCreateConversation(sessionId, config)
-                
-                if (sessionConversation == null) {
-                    val errorMsg = "Error: Failed to create conversation for session '$sessionId'"
-                    LogManager.e(TAG, errorMsg)
-                    return@withLock errorMsg
+        // Use per-session Mutex to ensure thread-safe access.
+        // NOTE: runBlocking bridges this non-suspend function (called by the Javalin
+        // HTTP handler) with the suspend world.  See generate() for more detail.
+        val mutex = getSessionMutex(sessionId)
+        return runBlocking {
+            mutex.mutexWithLock {
+                try {
+                    // Get or create conversation for this session
+                    val sessionConversation = getOrCreateConversation(sessionId, config)
+
+                    if (sessionConversation == null) {
+                        val errorMsg = "Error: Failed to create conversation for session '$sessionId'"
+                        LogManager.e(TAG, errorMsg)
+                        return@mutexWithLock errorMsg
+                    }
+
+                    // Send message with multimodal contents and get response synchronously
+                    val userMessage = Message.user(Contents.of(contents))
+                    val response = sessionConversation.sendMessage(userMessage)
+
+                    val result = response.toString()
+                    LogManager.i(TAG, "Multimodal generation completed successfully for session '$sessionId' (length: ${result.length})")
+                    result
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to generate multimodal response for session '$sessionId'", e)
+                    LogManager.e(TAG, "Failed to generate multimodal response: ${e.message}", e)
+                    "Error: ${e.message}"
                 }
-                
-                // Send message with multimodal contents and get response synchronously
-                val userMessage = Message.user(Contents.of(contents))
-                val response = sessionConversation.sendMessage(userMessage)
-                
-                val result = response.toString()
-                LogManager.i(TAG, "Multimodal generation completed successfully for session '$sessionId' (length: ${result.length})")
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to generate multimodal response for session '$sessionId'", e)
-                LogManager.e(TAG, "Failed to generate multimodal response: ${e.message}", e)
-                "Error: ${e.message}"
             }
         }
     }
@@ -418,92 +475,95 @@ class LlamaModel(
         
         return scope.launch {
             try {
-                // Use per-session lock to get or create conversation
-                val lock = getSessionLock(sessionId)
-                val sessionConversation = lock.withLock {
-                    getOrCreateConversation(sessionId, config)
-                }
-                
-                if (sessionConversation == null) {
-                    LogManager.e(TAG, "Failed to create conversation for session '$sessionId'")
-                    onToken("Error: Failed to create conversation for session '$sessionId'")
-                    return@launch
-                }
-                
-                // Use suspendCancellableCoroutine to wait for async callback to complete
-                // Note: This is outside the lock to avoid suspension point inside critical section
-                suspendCancellableCoroutine<Unit> { continuation ->
-                    val resumed = AtomicBoolean(false)
-                    // Use CompletableDeferred to signal when streaming job completes
-                    val streamingCompleted = CompletableDeferred<Unit>()
-                    
-                    // Use MessageCallback for streaming
-                    val callback = object : MessageCallback {
-                        override fun onMessage(message: Message) {
-                            // LiteRT's MessageCallback.onMessage is called once with the complete response
-                            // To provide proper streaming, we need to chunk the response and emit it progressively
-                            val fullText = message.toString()
-                            
-                            // Stream the response in chunks (word by word for better UX)
-                            // This simulates token-level streaming when the library provides complete responses
-                            scope.launch {
-                                try {
-                                    // Split by whitespace while preserving the spaces as separate tokens
-                                    // This provides natural word-by-word streaming
-                                    val parts = fullText.split(" ")
-                                    
-                                    for ((index, part) in parts.withIndex()) {
-                                        // Emit the word
-                                        if (part.isNotEmpty()) {
-                                            onToken(part)
-                                            delay(TOKEN_EMISSION_DELAY_MS)
-                                        }
-                                        // Emit the space after the word (except after the last word)
-                                        if (index < parts.size - 1) {
-                                            onToken(" ")
-                                            delay(TOKEN_EMISSION_DELAY_MS)
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    LogManager.e(TAG, "Error during chunked streaming", e)
-                                } finally {
-                                    // Signal that streaming is complete
-                                    streamingCompleted.complete(Unit)
-                                }
-                            }
-                        }
-                        
-                        override fun onDone() {
-                            LogManager.i(TAG, "Streaming completed for session '$sessionId'")
-                            // Wait for streaming job to complete before resuming
-                            scope.launch {
-                                // Await the streaming job completion
-                                // Note: If onMessage was never called, we complete the deferred here
-                                if (!streamingCompleted.isCompleted) {
-                                    streamingCompleted.complete(Unit)
-                                }
-                                streamingCompleted.await()
-                                // Resume the coroutine when streaming is done
-                                if (resumed.compareAndSet(false, true)) {
-                                    continuation.resume(Unit)
-                                }
-                            }
-                        }
-                        
-                        override fun onError(throwable: Throwable) {
-                            Log.e(TAG, "Streaming error for session '$sessionId'", throwable)
-                            LogManager.e(TAG, "Streaming error: ${throwable.message}", throwable)
-                            // Complete the deferred to unblock any waiters
-                            streamingCompleted.complete(Unit)
-                            // Resume with exception on error
-                            if (resumed.compareAndSet(false, true)) {
-                                continuation.resumeWithException(throwable)
-                            }
-                        }
+                // Use per-session Mutex so the lock can be held across the suspension
+                // point inside sendMessageAsync, preventing two concurrent requests to
+                // the same session from using the Conversation object simultaneously.
+                val mutex = getSessionMutex(sessionId)
+                mutex.mutexWithLock {
+                    val sessionConversation = getOrCreateConversation(sessionId, config)
+
+                    if (sessionConversation == null) {
+                        LogManager.e(TAG, "Failed to create conversation for session '$sessionId'")
+                        onToken("Error: Failed to create conversation for session '$sessionId'")
+                        return@mutexWithLock
                     }
-                    
-                    val userMessage = Message.user(prompt)
-                    sessionConversation.sendMessageAsync(userMessage, callback)
+
+                    // Use suspendCancellableCoroutine to wait for the async callback.
+                    // The Mutex is intentionally held here so that a second request for
+                    // the same session waits until the current generation is complete.
+                    suspendCancellableCoroutine<Unit> { continuation ->
+                        val resumed = AtomicBoolean(false)
+                        // Use CompletableDeferred to signal when streaming job completes
+                        val streamingCompleted = CompletableDeferred<Unit>()
+                        
+                        // Use MessageCallback for streaming
+                        val callback = object : MessageCallback {
+                            override fun onMessage(message: Message) {
+                                // LiteRT's MessageCallback.onMessage is called once with the complete response
+                                // To provide proper streaming, we need to chunk the response and emit it progressively
+                                val fullText = message.toString()
+                                
+                                // Stream the response in chunks (word by word for better UX)
+                                // This simulates token-level streaming when the library provides complete responses
+                                scope.launch {
+                                    try {
+                                        // Split by whitespace while preserving the spaces as separate tokens
+                                        // This provides natural word-by-word streaming
+                                        val parts = fullText.split(" ")
+                                        
+                                        for ((index, part) in parts.withIndex()) {
+                                            // Emit the word
+                                            if (part.isNotEmpty()) {
+                                                onToken(part)
+                                                delay(TOKEN_EMISSION_DELAY_MS)
+                                            }
+                                            // Emit the space after the word (except after the last word)
+                                            if (index < parts.size - 1) {
+                                                onToken(" ")
+                                                delay(TOKEN_EMISSION_DELAY_MS)
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        LogManager.e(TAG, "Error during chunked streaming", e)
+                                    } finally {
+                                        // Signal that streaming is complete
+                                        streamingCompleted.complete(Unit)
+                                    }
+                                }
+                            }
+                            
+                            override fun onDone() {
+                                LogManager.i(TAG, "Streaming completed for session '$sessionId'")
+                                // Wait for streaming job to complete before resuming
+                                scope.launch {
+                                    // Await the streaming job completion
+                                    // Note: If onMessage was never called, we complete the deferred here
+                                    if (!streamingCompleted.isCompleted) {
+                                        streamingCompleted.complete(Unit)
+                                    }
+                                    streamingCompleted.await()
+                                    // Resume the coroutine when streaming is done
+                                    if (resumed.compareAndSet(false, true)) {
+                                        continuation.resume(Unit)
+                                    }
+                                }
+                            }
+                            
+                            override fun onError(throwable: Throwable) {
+                                Log.e(TAG, "Streaming error for session '$sessionId'", throwable)
+                                LogManager.e(TAG, "Streaming error: ${throwable.message}", throwable)
+                                // Complete the deferred to unblock any waiters
+                                streamingCompleted.complete(Unit)
+                                // Resume with exception on error
+                                if (resumed.compareAndSet(false, true)) {
+                                    continuation.resumeWithException(throwable)
+                                }
+                            }
+                        }
+                        
+                        val userMessage = Message.user(prompt)
+                        sessionConversation.sendMessageAsync(userMessage, callback)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming failed for session '$sessionId'", e)
@@ -550,89 +610,92 @@ class LlamaModel(
         
         return scope.launch {
             try {
-                // Use per-session lock to get or create conversation
-                val lock = getSessionLock(sessionId)
-                val sessionConversation = lock.withLock {
-                    getOrCreateConversation(sessionId, config)
-                }
-                
-                if (sessionConversation == null) {
-                    LogManager.e(TAG, "Failed to create conversation for session '$sessionId'")
-                    onToken("Error: Failed to create conversation for session '$sessionId'")
-                    return@launch
-                }
-                
-                // Use suspendCancellableCoroutine to wait for async callback to complete
-                // Note: This is outside the lock to avoid suspension point inside critical section
-                suspendCancellableCoroutine<Unit> { continuation ->
-                    val resumed = AtomicBoolean(false)
-                    // Use CompletableDeferred to signal when streaming job completes
-                    val streamingCompleted = CompletableDeferred<Unit>()
-                    
-                    // Use MessageCallback for streaming
-                    val callback = object : MessageCallback {
-                        override fun onMessage(message: Message) {
-                            // LiteRT's MessageCallback.onMessage is called once with the complete response
-                            // To provide proper streaming, we need to chunk the response and emit it progressively
-                            val fullText = message.toString()
-                            
-                            // Stream the response in chunks (word by word for better UX)
-                            scope.launch {
-                                try {
-                                    // Split by whitespace while preserving the spaces as separate tokens
-                                    val parts = fullText.split(" ")
-                                    
-                                    for ((index, part) in parts.withIndex()) {
-                                        // Emit the word
-                                        if (part.isNotEmpty()) {
-                                            onToken(part)
-                                            delay(TOKEN_EMISSION_DELAY_MS)
-                                        }
-                                        // Emit the space after the word (except after the last word)
-                                        if (index < parts.size - 1) {
-                                            onToken(" ")
-                                            delay(TOKEN_EMISSION_DELAY_MS)
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    LogManager.e(TAG, "Error during chunked streaming", e)
-                                } finally {
-                                    // Signal that streaming is complete
-                                    streamingCompleted.complete(Unit)
-                                }
-                            }
-                        }
-                        
-                        override fun onDone() {
-                            LogManager.i(TAG, "Multimodal streaming completed for session '$sessionId'")
-                            // Wait for streaming job to complete before resuming
-                            scope.launch {
-                                // Await the streaming job completion
-                                if (!streamingCompleted.isCompleted) {
-                                    streamingCompleted.complete(Unit)
-                                }
-                                streamingCompleted.await()
-                                // Resume the coroutine when streaming is done
-                                if (resumed.compareAndSet(false, true)) {
-                                    continuation.resume(Unit)
-                                }
-                            }
-                        }
-                        
-                        override fun onError(throwable: Throwable) {
-                            Log.e(TAG, "Multimodal streaming error for session '$sessionId'", throwable)
-                            LogManager.e(TAG, "Multimodal streaming error: ${throwable.message}", throwable)
-                            // Complete the deferred to unblock any waiters
-                            streamingCompleted.complete(Unit)
-                            // Resume with exception on error
-                            if (resumed.compareAndSet(false, true)) {
-                                continuation.resumeWithException(throwable)
-                            }
-                        }
+                // Use per-session Mutex so the lock can be held across the suspension
+                // point inside sendMessageAsync, preventing two concurrent requests to
+                // the same session from using the Conversation object simultaneously.
+                val mutex = getSessionMutex(sessionId)
+                mutex.mutexWithLock {
+                    val sessionConversation = getOrCreateConversation(sessionId, config)
+
+                    if (sessionConversation == null) {
+                        LogManager.e(TAG, "Failed to create conversation for session '$sessionId'")
+                        onToken("Error: Failed to create conversation for session '$sessionId'")
+                        return@mutexWithLock
                     }
-                    
-                    val userMessage = Message.user(Contents.of(contents))
-                    sessionConversation.sendMessageAsync(userMessage, callback)
+
+                    // Use suspendCancellableCoroutine to wait for the async callback.
+                    // The Mutex is intentionally held here so that a second request for
+                    // the same session waits until the current generation is complete.
+                    suspendCancellableCoroutine<Unit> { continuation ->
+                        val resumed = AtomicBoolean(false)
+                        // Use CompletableDeferred to signal when streaming job completes
+                        val streamingCompleted = CompletableDeferred<Unit>()
+                        
+                        // Use MessageCallback for streaming
+                        val callback = object : MessageCallback {
+                            override fun onMessage(message: Message) {
+                                // LiteRT's MessageCallback.onMessage is called once with the complete response
+                                // To provide proper streaming, we need to chunk the response and emit it progressively
+                                val fullText = message.toString()
+                                
+                                // Stream the response in chunks (word by word for better UX)
+                                scope.launch {
+                                    try {
+                                        // Split by whitespace while preserving the spaces as separate tokens
+                                        val parts = fullText.split(" ")
+                                        
+                                        for ((index, part) in parts.withIndex()) {
+                                            // Emit the word
+                                            if (part.isNotEmpty()) {
+                                                onToken(part)
+                                                delay(TOKEN_EMISSION_DELAY_MS)
+                                            }
+                                            // Emit the space after the word (except after the last word)
+                                            if (index < parts.size - 1) {
+                                                onToken(" ")
+                                                delay(TOKEN_EMISSION_DELAY_MS)
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        LogManager.e(TAG, "Error during chunked streaming", e)
+                                    } finally {
+                                        // Signal that streaming is complete
+                                        streamingCompleted.complete(Unit)
+                                    }
+                                }
+                            }
+                            
+                            override fun onDone() {
+                                LogManager.i(TAG, "Multimodal streaming completed for session '$sessionId'")
+                                // Wait for streaming job to complete before resuming
+                                scope.launch {
+                                    // Await the streaming job completion
+                                    if (!streamingCompleted.isCompleted) {
+                                        streamingCompleted.complete(Unit)
+                                    }
+                                    streamingCompleted.await()
+                                    // Resume the coroutine when streaming is done
+                                    if (resumed.compareAndSet(false, true)) {
+                                        continuation.resume(Unit)
+                                    }
+                                }
+                            }
+                            
+                            override fun onError(throwable: Throwable) {
+                                Log.e(TAG, "Multimodal streaming error for session '$sessionId'", throwable)
+                                LogManager.e(TAG, "Multimodal streaming error: ${throwable.message}", throwable)
+                                // Complete the deferred to unblock any waiters
+                                streamingCompleted.complete(Unit)
+                                // Resume with exception on error
+                                if (resumed.compareAndSet(false, true)) {
+                                    continuation.resumeWithException(throwable)
+                                }
+                            }
+                        }
+                        
+                        val userMessage = Message.user(Contents.of(contents))
+                        sessionConversation.sendMessageAsync(userMessage, callback)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Multimodal streaming failed for session '$sessionId'", e)
