@@ -2,12 +2,15 @@ package com.wannaphong.hostai
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.Uri
+import android.provider.OpenableColumns
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.io.File
 
 /**
- * Data class representing a stored model
+ * Data class representing a stored model.
+ * [path] may be either an absolute file-system path or a content:// URI string.
  */
 data class StoredModel(
     val id: String,
@@ -74,6 +77,11 @@ class ModelManager(private val context: Context) {
         }
     }
     
+    /**
+     * Returns true if [path] is a content:// URI rather than a plain file path.
+     */
+    private fun isContentUri(path: String): Boolean = path.startsWith("content://")
+
     /**
      * Add a new model by copying from source path
      * @param sourcePath Source file path
@@ -146,7 +154,40 @@ class ModelManager(private val context: Context) {
             }
         }
     }
-    
+
+    /**
+     * Add a model that lives at a content:// URI without copying the file.
+     * The caller must have already called [ContentResolver.takePersistableUriPermission]
+     * for [uriString] before invoking this.
+     * @param uriString  The content URI string (e.g. "content://…")
+     * @param fileName   Display name shown in the UI
+     * @param fileSize   File size in bytes (pass 0 if unknown)
+     * @return StoredModel on success, null on failure
+     */
+    fun addModelFromUri(uriString: String, fileName: String, fileSize: Long): StoredModel? {
+        synchronized(lock) {
+            return try {
+                val id = generateModelId()
+                val model = StoredModel(
+                    id = id,
+                    name = fileName,
+                    path = uriString,
+                    sizeBytes = fileSize,
+                    addedTimestamp = System.currentTimeMillis(),
+                    isSelected = false
+                )
+                val models = getModels().toMutableList()
+                models.add(model)
+                saveModels(models)
+                LogManager.i(TAG, "Added model from URI: $fileName (${fileSize / 1024 / 1024} MB)")
+                model
+            } catch (e: Exception) {
+                LogManager.e(TAG, "Failed to add model from URI", e)
+                null
+            }
+        }
+    }
+
     /**
      * Remove a model by ID
      */
@@ -156,13 +197,15 @@ class ModelManager(private val context: Context) {
                 val models = getModels().toMutableList()
                 val model = models.find { it.id == modelId } ?: return false
                 
-                // Delete file
-                val file = File(model.path)
-                if (file.exists()) {
-                    val deleted = file.delete()
-                    if (!deleted) {
-                        LogManager.e(TAG, "Failed to delete model file: ${model.path}")
-                        return false
+                // Only delete the underlying file for file-path models (not content URIs)
+                if (!isContentUri(model.path)) {
+                    val file = File(model.path)
+                    if (file.exists()) {
+                        val deleted = file.delete()
+                        if (!deleted) {
+                            LogManager.e(TAG, "Failed to delete model file: ${model.path}")
+                            return false
+                        }
                     }
                 }
                 
@@ -185,22 +228,47 @@ class ModelManager(private val context: Context) {
     }
     
     /**
-     * Get the selected model (validates file exists)
+     * Get the selected model (validates accessibility).
+     * For file-path models the file is checked for existence.
+     * For content-URI models the URI is queried via ContentResolver.
      */
     fun getSelectedModel(): StoredModel? {
         synchronized(lock) {
             val selectedId = getSelectedModelId() ?: return null
             val model = getModels().find { it.id == selectedId } ?: return null
             
-            // Validate that the model file still exists
-            val file = File(model.path)
-            if (!file.exists()) {
-                LogManager.w(TAG, "Selected model file not found, clearing selection: ${model.path}")
-                setSelectedModelId(null)
-                return null
+            return if (isContentUri(model.path)) {
+                // Validate that the URI is still accessible.
+                // A non-null cursor from query() is sufficient to confirm the URI is valid;
+                // moveToFirst() may return false for a valid URI if the cursor has no rows.
+                try {
+                    val uri = Uri.parse(model.path)
+                    val accessible = context.contentResolver.query(
+                        uri, arrayOf(OpenableColumns.SIZE), null, null, null
+                    )?.use { true } ?: false
+                    if (!accessible) {
+                        LogManager.w(TAG, "Content URI no longer accessible, clearing selection: ${model.path}")
+                        setSelectedModelId(null)
+                        null
+                    } else {
+                        model
+                    }
+                } catch (e: Exception) {
+                    LogManager.w(TAG, "Failed to validate content URI, clearing selection: ${e.message}")
+                    setSelectedModelId(null)
+                    null
+                }
+            } else {
+                // Validate that the model file still exists
+                val file = File(model.path)
+                if (!file.exists()) {
+                    LogManager.w(TAG, "Selected model file not found, clearing selection: ${model.path}")
+                    setSelectedModelId(null)
+                    null
+                } else {
+                    model
+                }
             }
-            
-            return model
         }
     }
     
@@ -225,11 +293,13 @@ class ModelManager(private val context: Context) {
                         return false
                     }
                     
-                    // Verify file exists
-                    val file = File(model.path)
-                    if (!file.exists()) {
-                        LogManager.e(TAG, "Model file not found: ${model.path}")
-                        return false
+                    // For file-path models, verify the file exists
+                    if (!isContentUri(model.path)) {
+                        val file = File(model.path)
+                        if (!file.exists()) {
+                            LogManager.e(TAG, "Model file not found: ${model.path}")
+                            return false
+                        }
                     }
                     
                     LogManager.i(TAG, "Selected model: ${model.name}")
@@ -268,17 +338,35 @@ class ModelManager(private val context: Context) {
     }
     
     /**
-     * Validate that model files exist
+     * Validate that model files / URIs are accessible.
+     * Removes any that are no longer accessible from the stored list.
      */
     fun validateModels(): List<String> {
         val models = getModels()
         val invalidModels = mutableListOf<String>()
         
         models.forEach { model ->
-            val file = File(model.path)
-            if (!file.exists()) {
-                invalidModels.add(model.id)
-                LogManager.w(TAG, "Model file not found: ${model.name}")
+            if (isContentUri(model.path)) {
+                try {
+                    val uri = Uri.parse(model.path)
+                    // A non-null cursor indicates the URI is accessible
+                    val accessible = context.contentResolver.query(
+                        uri, arrayOf(OpenableColumns.SIZE), null, null, null
+                    )?.use { true } ?: false
+                    if (!accessible) {
+                        invalidModels.add(model.id)
+                        LogManager.w(TAG, "Content URI no longer accessible: ${model.name}")
+                    }
+                } catch (e: Exception) {
+                    invalidModels.add(model.id)
+                    LogManager.w(TAG, "Failed to validate content URI for: ${model.name}")
+                }
+            } else {
+                val file = File(model.path)
+                if (!file.exists()) {
+                    invalidModels.add(model.id)
+                    LogManager.w(TAG, "Model file not found: ${model.name}")
+                }
             }
         }
         
