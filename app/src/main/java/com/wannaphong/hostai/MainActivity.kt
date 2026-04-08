@@ -23,14 +23,11 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import com.wannaphong.hostai.databinding.ActivityMainBinding
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -423,7 +420,6 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun handleSelectedFile(uri: Uri) {
-        var tempFile: File? = null
         try {
             LogManager.i("MainActivity", "User selected a file")
             
@@ -458,21 +454,12 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             
-            // Show progress
-            Toast.makeText(this, "Adding model...", Toast.LENGTH_SHORT).show()
+            // Take a persistent read permission so the model can be accessed
+            // across app restarts without copying the file.
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             
-            // Copy file to temporary location first
-            LogManager.i("MainActivity", "Copying file to temporary storage...")
-            tempFile = File.createTempFile("model_temp", ".litertlm", cacheDir)
-            
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            
-            // Add model using ModelManager
-            val model = modelManager.addModel(tempFile.absolutePath, validFileName)
+            // Register the model by its URI – no file copy needed
+            val model = modelManager.addModelFromUri(uri.toString(), validFileName, fileSize)
             
             if (model != null) {
                 // Set as selected model
@@ -500,16 +487,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             LogManager.e("MainActivity", "Failed to load model file", e)
             Toast.makeText(this, "Failed to load model: ${e.message}", Toast.LENGTH_LONG).show()
-        } finally {
-            // Always cleanup temp file
-            tempFile?.let {
-                if (it.exists()) {
-                    val deleted = it.delete()
-                    if (!deleted) {
-                        LogManager.w("MainActivity", "Failed to delete temp file: ${it.absolutePath}")
-                    }
-                }
-            }
         }
     }
     

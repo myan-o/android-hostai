@@ -16,8 +16,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.wannaphong.hostai.databinding.ActivityModelManagementBinding
 import com.wannaphong.hostai.databinding.ItemModelBinding
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -109,7 +107,6 @@ class ModelManagementActivity : AppCompatActivity() {
     }
     
     private fun handleSelectedFile(uri: Uri) {
-        var tempFile: File? = null
         try {
             LogManager.i("ModelManagement", "User selected a file")
             
@@ -143,21 +140,12 @@ class ModelManagementActivity : AppCompatActivity() {
                 return
             }
             
-            // Show progress
-            Toast.makeText(this, "Adding model...", Toast.LENGTH_SHORT).show()
+            // Take a persistent read permission so the model can be accessed
+            // across app restarts without copying the file.
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             
-            // Copy file to temporary location first
-            LogManager.i("ModelManagement", "Copying file to temporary storage...")
-            tempFile = File.createTempFile("model_temp", ".litertlm", cacheDir)
-            
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            
-            // Add model using ModelManager
-            val model = modelManager.addModel(tempFile.absolutePath, validFileName)
+            // Register the model by its URI – no file copy needed
+            val model = modelManager.addModelFromUri(uri.toString(), validFileName, fileSize)
             
             if (model != null) {
                 LogManager.i("ModelManagement", "Model added successfully: ${model.name}")
@@ -171,16 +159,6 @@ class ModelManagementActivity : AppCompatActivity() {
         } catch (e: Exception) {
             LogManager.e("ModelManagement", "Failed to load model file", e)
             Toast.makeText(this, "Failed to load model: ${e.message}", Toast.LENGTH_LONG).show()
-        } finally {
-            // Always cleanup temp file
-            tempFile?.let {
-                if (it.exists()) {
-                    val deleted = it.delete()
-                    if (!deleted) {
-                        LogManager.w("ModelManagement", "Failed to delete temp file: ${it.absolutePath}")
-                    }
-                }
-            }
         }
     }
     

@@ -2,6 +2,8 @@ package com.wannaphong.hostai
 
 import android.content.ContentResolver
 import android.content.Context
+import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Contents
@@ -63,6 +65,12 @@ class LlamaModel(
     @Volatile private var engine: Engine? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    // ParcelFileDescriptor kept open for the lifetime of the engine when the model is
+    // loaded from a content:// URI. LiteRT requires a file-system path, so we open a
+    // ParcelFileDescriptor and pass "/proc/self/fd/{fd}" to EngineConfig. The PFD must
+    // stay open as long as the engine uses the underlying file.
+    @Volatile private var modelPfd: ParcelFileDescriptor? = null
+
     // Global Mutex to serialise Engine.createConversation() calls.
     // The LiteRT engine may not safely support concurrent conversation creation.
     private val engineCreationLock = Mutex()
@@ -96,20 +104,53 @@ class LlamaModel(
             isLoaded = true
             return true
         }
-        
-        // It's a file path
-        val file = File(modelPath)
-        if (file.exists()) {
-            modelName = file.name
-            LogManager.i(TAG, "Model file found: $modelName (${file.length() / 1024 / 1024} MB)")
+
+        // Resolve the actual file-system path that LiteRT will use.
+        // For content:// URIs we open a ParcelFileDescriptor and use the
+        // kernel's /proc/self/fd/<n> symlink so no file copy is needed.
+        val enginePath: String
+        if (modelPath.startsWith("content://")) {
+            return try {
+                val uri = Uri.parse(modelPath)
+                val pfd = contentResolver.openFileDescriptor(uri, "r")
+                    ?: run {
+                        LogManager.e(TAG, "Failed to open file descriptor for URI: $modelPath")
+                        return false
+                    }
+                modelPfd = pfd
+                enginePath = "/proc/self/fd/${pfd.fd}"
+                // Derive a display name from the URI path component
+                modelName = uri.lastPathSegment?.substringAfterLast('/')
+                    ?.substringAfterLast(':')
+                    ?: "litert-model"
+                LogManager.i(TAG, "Opened URI via fd $enginePath (model: $modelName)")
+                loadFromPath(enginePath)
+            } catch (e: Exception) {
+                LogManager.e(TAG, "Failed to open URI: ${e.message}", e)
+                false
+            }
         } else {
-            LogManager.e(TAG, "Model file not found at path: $modelPath")
-            return false
+            // It's a plain file path
+            val file = File(modelPath)
+            if (file.exists()) {
+                modelName = file.name
+                LogManager.i(TAG, "Model file found: $modelName (${file.length() / 1024 / 1024} MB)")
+            } else {
+                LogManager.e(TAG, "Model file not found at path: $modelPath")
+                return false
+            }
+            enginePath = modelPath
+            return loadFromPath(enginePath)
         }
-        
+    }
+
+    /**
+     * Initialise the LiteRT engine from a file-system path (or /proc/self/fd/<n> symlink).
+     */
+    private fun loadFromPath(enginePath: String): Boolean {
         return try {
             LogManager.i(TAG, "Initializing LiteRT with model: $modelName")
-            
+
             // Get backend preference from settings
             val useGpu = settingsManager.isGpuBackendEnabled()
             val backend = if (useGpu) Backend.GPU() else Backend.CPU()
@@ -124,7 +165,7 @@ class LlamaModel(
             // Vision backend: GPU for better performance (Gemma-3N requires GPU for vision)
             // Audio backend: CPU (Gemma-3N requires CPU for audio)
             val engineConfig = EngineConfig(
-                modelPath = modelPath,
+                modelPath = enginePath,
                 backend = backend,
                 maxNumTokens = maxContextLength,
                 visionBackend = Backend.GPU(),  // Enable vision processing
@@ -146,6 +187,11 @@ class LlamaModel(
             LogManager.e(TAG, "Failed to load model: ${e.message}", e)
             engine = null
             isLoaded = false
+            // Close the PFD if we opened one and loading failed
+            try { modelPfd?.close() } catch (ex: Exception) {
+                LogManager.w(TAG, "Error closing model PFD after load failure: ${ex.message}")
+            }
+            modelPfd = null
             false
         }
     }
@@ -574,6 +620,13 @@ class LlamaModel(
                 scope.cancel()
                 engine?.close()
                 engine = null
+                // Close the model file descriptor (opened for content:// URI models).
+                // This must happen AFTER the engine is closed so the native code
+                // is no longer reading from /proc/self/fd/<n>.
+                try { modelPfd?.close() } catch (e: Exception) {
+                    LogManager.w(TAG, "Error closing model PFD: ${e.message}")
+                }
+                modelPfd = null
             }
 
             isLoaded = false
