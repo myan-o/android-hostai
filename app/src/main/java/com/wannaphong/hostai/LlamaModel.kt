@@ -237,7 +237,11 @@ class LlamaModel(
 
             // Compiled-kernel cache directory: speeds up subsequent model loads by reusing
             // pre-compiled GPU/NPU kernels instead of recompiling them on every launch.
-            val cacheDir = File(context.cacheDir, "litert_cache").also { it.mkdirs() }.absolutePath
+            val cacheDirFile = File(context.cacheDir, "litert_cache")
+            if (!cacheDirFile.exists() && !cacheDirFile.mkdirs()) {
+                LogManager.w(TAG, "Failed to create LiteRT cache directory; compiled kernels will not be cached")
+            }
+            val cacheDir = cacheDirFile.absolutePath
 
             // Create engine config with selected backend.
             // Only add vision/audio backends for multimodal models (e.g. Gemma-3N).
