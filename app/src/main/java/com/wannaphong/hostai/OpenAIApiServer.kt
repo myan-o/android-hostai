@@ -1386,15 +1386,15 @@ class OpenAIApiServer(
      */
     private fun extractGenerationConfig(request: JsonObject): GenerationConfig {
         // Parse extra_body for additional context (OpenAI API compatibility)
-        val extraContext = parseExtraBody(request.getAsJsonObject("extra_body"))
-        
+        val chatTemplateKwArgs = parseExtraBody(request.getAsJsonObject("chat_template_kwargs"))
+
         return GenerationConfig(
             maxTokens = request.get("max_tokens")?.asInt ?: 100,
             temperature = request.get("temperature")?.asDouble ?: 0.7,
             topK = request.get("top_k")?.asInt ?: 40,
             topP = request.get("top_p")?.asDouble ?: 0.95,
             seed = request.get("seed")?.asInt ?: -1,
-            extraContext = extraContext
+            chatTemplateKwArgs = chatTemplateKwArgs
         )
     }
     
@@ -1403,12 +1403,12 @@ class OpenAIApiServer(
      * The extra_body parameter allows passing additional JSON properties 
      * that can be used for model-specific features like thinking mode.
      */
-    private fun parseExtraBody(extraBodyObj: com.google.gson.JsonObject?): Map<String, Any>? {
+    private fun parseExtraBody(extraBodyObj: com.google.gson.JsonObject?): Map<String, Any> {
         if (extraBodyObj == null || extraBodyObj.isEmpty()) {
-            return null
+            return emptyMap()
         }
         
-        LogManager.d(TAG, "Extra body provided in request with ${extraBodyObj.size()} properties")
+        LogManager.d(TAG, "chat template args provided in request with ${extraBodyObj.size()} properties")
         
         // Convert JsonObject to Map<String, Any>
         return extraBodyObj.entrySet().associate { entry ->

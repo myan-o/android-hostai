@@ -42,7 +42,7 @@ data class GenerationConfig(
     val topK: Int = 40,
     val topP: Double = 0.95,
     val seed: Int = -1,
-    val extraContext: Map<String, Any>? = null  // Extra context for prompt template (from extra_body)
+    val chatTemplateKwArgs: Map<String, Any> = emptyMap()
 )
 
 /**
@@ -306,11 +306,6 @@ class LlamaModel(
      * @return The conversation instance, or null if creation fails
      */
     private fun createConversation(config: GenerationConfig): Conversation? {
-        // Log extra context if provided (for debugging/future support)
-        if (config.extraContext?.isNotEmpty() == true) {
-            LogManager.d(TAG, "Extra context provided: ${config.extraContext}")
-        }
-
         return try {
             val currentEngine = engine
                 ?: throw IllegalStateException("Engine is not initialized")
@@ -383,7 +378,7 @@ class LlamaModel(
 
                         // Send message and get response synchronously
                         val userMessage = Message.user(prompt)
-                        val response = conversation.sendMessage(userMessage)
+                        val response = conversation.sendMessage(userMessage, config.chatTemplateKwArgs)
                         val result = response.toString()
                         LogManager.i(TAG, "Generation completed successfully (length: ${result.length})")
                         result
@@ -443,7 +438,7 @@ class LlamaModel(
 
                         // Send message with multimodal contents and get response synchronously
                         val userMessage = Message.user(Contents.of(contents))
-                        val response = conversation.sendMessage(userMessage)
+                        val response = conversation.sendMessage(userMessage, config.chatTemplateKwArgs)
                         val result = response.toString()
                         LogManager.i(TAG, "Multimodal generation completed successfully (length: ${result.length})")
                         result
@@ -531,7 +526,7 @@ class LlamaModel(
                                     // Wrap in try-catch: exceptions must never escape a JNI callback or
                                     // they will crash the native engine / the Android process.
                                     try {
-                                        onToken(message.toString())
+                                        onToken(message.channels["thought"] ?: message.toString())
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Token callback error (client may have disconnected): ${e.message}")
                                         if (resumed.compareAndSet(false, true)) {
@@ -557,7 +552,7 @@ class LlamaModel(
                             }
 
                             val userMessage = Message.user(prompt)
-                            conversation.sendMessageAsync(userMessage, callback)
+                            conversation.sendMessageAsync(userMessage, callback, config.chatTemplateKwArgs)
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Streaming failed", e)
@@ -634,7 +629,7 @@ class LlamaModel(
                                     // Wrap in try-catch: exceptions must never escape a JNI callback or
                                     // they will crash the native engine / the Android process.
                                     try {
-                                        onToken(message.toString())
+                                        onToken(message.channels["thought"] ?: message.toString())
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Multimodal token callback error (client may have disconnected): ${e.message}")
                                         if (resumed.compareAndSet(false, true)) {
@@ -660,7 +655,7 @@ class LlamaModel(
                             }
 
                             val userMessage = Message.user(Contents.of(contents))
-                            conversation.sendMessageAsync(userMessage, callback)
+                            conversation.sendMessageAsync(userMessage, callback, config.chatTemplateKwArgs)
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Multimodal streaming failed", e)
