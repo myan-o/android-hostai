@@ -669,7 +669,7 @@ class LlamaModel(
                                                 token = message.toString()
                                             }
                                         }
-                                        onToken(message.channels["thought"] ?: message.toString())
+                                        onToken(token)
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Multimodal token callback error (client may have disconnected): ${e.message}")
                                         if (resumed.compareAndSet(false, true)) {
