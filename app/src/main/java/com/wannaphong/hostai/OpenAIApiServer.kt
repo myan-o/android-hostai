@@ -1388,6 +1388,9 @@ class OpenAIApiServer(
         // Parse extra_body for additional context (OpenAI API compatibility)
         val chatTemplateKwArgs = parseExtraBody(request.getAsJsonObject("chat_template_kwargs"))
 
+        if ("enable_thinking" !in chatTemplateKwArgs) chatTemplateKwArgs["enable_thinking"] = true
+        if ("reasoning_effort" !in chatTemplateKwArgs) chatTemplateKwArgs["reasoning_effort"] = "medium"
+
         return GenerationConfig(
             maxTokens = request.get("max_tokens")?.asInt ?: 100,
             temperature = request.get("temperature")?.asDouble ?: 0.7,
@@ -1403,9 +1406,9 @@ class OpenAIApiServer(
      * The extra_body parameter allows passing additional JSON properties 
      * that can be used for model-specific features like thinking mode.
      */
-    private fun parseExtraBody(extraBodyObj: com.google.gson.JsonObject?): Map<String, Any> {
+    private fun parseExtraBody(extraBodyObj: com.google.gson.JsonObject?): MutableMap<String, Any> {
         if (extraBodyObj == null || extraBodyObj.isEmpty()) {
-            return emptyMap()
+            return mutableMapOf<String, Any>()
         }
         
         LogManager.d(TAG, "chat template args provided in request with ${extraBodyObj.size()} properties")
@@ -1431,6 +1434,6 @@ class OpenAIApiServer(
                 else -> entry.value.toString()
             }
             entry.key to value
-        }.filterValues { it != null } as Map<String, Any>
+        }.filterValues { it != null } as MutableMap<String, Any>
     }
 }
