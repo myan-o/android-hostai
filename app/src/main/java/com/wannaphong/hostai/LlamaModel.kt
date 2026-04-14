@@ -518,6 +518,7 @@ class LlamaModel(
                         // Use suspendCancellableCoroutine to bridge the async callback with coroutines.
                         suspendCancellableCoroutine<Unit> { continuation ->
                             val resumed = AtomicBoolean(false)
+                            val in_think = AtomicBoolean(false)
 
                             val callback = object : MessageCallback {
                                 override fun onMessage(message: Message) {
@@ -526,7 +527,26 @@ class LlamaModel(
                                     // Wrap in try-catch: exceptions must never escape a JNI callback or
                                     // they will crash the native engine / the Android process.
                                     try {
-                                        onToken(message.channels["thought"] ?: message.toString())
+                                        var token = ""
+                                        if (in_think.get()) {
+                                            if (null == message.channels["thought"]) {
+                                                in_think.set(false)
+                                                token = "</think>\n" + message.toString()
+                                            }
+                                            else {
+                                                token = message.channels["thought"] ?: ""
+                                            }
+                                        }
+                                        else {
+                                            if (null != message.channels["thought"]) {
+                                                in_think.set(true)
+                                                token = "<think>\n" + message.channels["thought"]
+                                            }
+                                            else {
+                                                token = message.toString()
+                                            }
+                                        }
+                                        onToken(token)
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Token callback error (client may have disconnected): ${e.message}")
                                         if (resumed.compareAndSet(false, true)) {
@@ -622,6 +642,7 @@ class LlamaModel(
 
                         suspendCancellableCoroutine<Unit> { continuation ->
                             val resumed = AtomicBoolean(false)
+                            val in_think = AtomicBoolean(false)
 
                             val callback = object : MessageCallback {
                                 override fun onMessage(message: Message) {
@@ -629,6 +650,25 @@ class LlamaModel(
                                     // Wrap in try-catch: exceptions must never escape a JNI callback or
                                     // they will crash the native engine / the Android process.
                                     try {
+                                        var token = ""
+                                        if (in_think.get()) {
+                                            if (null == message.channels["thought"]) {
+                                                in_think.set(false)
+                                                token = "</think>\n" + message.toString()
+                                            }
+                                            else {
+                                                token = message.channels["thought"] ?: ""
+                                            }
+                                        }
+                                        else {
+                                            if (null != message.channels["thought"]) {
+                                                in_think.set(true)
+                                                token = "<think>\n" + message.channels["thought"]
+                                            }
+                                            else {
+                                                token = message.toString()
+                                            }
+                                        }
                                         onToken(message.channels["thought"] ?: message.toString())
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Multimodal token callback error (client may have disconnected): ${e.message}")
