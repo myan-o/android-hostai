@@ -531,7 +531,7 @@ class LlamaModel(
                                         if (in_think.get()) {
                                             if (null == message.channels["thought"]) {
                                                 in_think.set(false)
-                                                token = "</think>\n" + message.toString()
+                                                token = "\n</think>\n" + message.toString()
                                             }
                                             else {
                                                 token = message.channels["thought"] ?: ""
@@ -654,7 +654,7 @@ class LlamaModel(
                                         if (in_think.get()) {
                                             if (null == message.channels["thought"]) {
                                                 in_think.set(false)
-                                                token = "</think>\n" + message.toString()
+                                                token = "\n</think>\n" + message.toString()
                                             }
                                             else {
                                                 token = message.channels["thought"] ?: ""
