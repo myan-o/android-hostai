@@ -393,9 +393,6 @@ class LlamaModel(
                         LogManager.e(TAG, "Failed to generate response: ${e.message}", e)
                         "Error: ${e.message}"
                     } finally {
-                        try { conversation?.close() } catch (e: Exception) {
-                            LogManager.w(TAG, "Error closing conversation: ${e.message}")
-                        }
                     }
                 }
             }
@@ -453,9 +450,6 @@ class LlamaModel(
                         LogManager.e(TAG, "Failed to generate multimodal response: ${e.message}", e)
                         "Error: ${e.message}"
                     } finally {
-                        try { conversation?.close() } catch (e: Exception) {
-                            LogManager.w(TAG, "Error closing conversation: ${e.message}")
-                        }
                     }
                 }
             }
@@ -587,9 +581,6 @@ class LlamaModel(
                             // Client may have already disconnected; nothing to do.
                         }
                     } finally {
-                        try { conversation?.close() } catch (e: Exception) {
-                            LogManager.w(TAG, "Error closing conversation: ${e.message}")
-                        }
                     }
                 }
             }
@@ -710,9 +701,6 @@ class LlamaModel(
                             // Client may have already disconnected; nothing to do.
                         }
                     } finally {
-                        try { conversation?.close() } catch (e: Exception) {
-                            LogManager.w(TAG, "Error closing conversation: ${e.message}")
-                        }
                     }
                 }
             }
