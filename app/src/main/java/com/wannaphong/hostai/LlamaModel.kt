@@ -61,6 +61,7 @@ class LlamaModel(
     
     // LiteRT components
     @Volatile private var engine: Engine? = null
+    @Volatile private var conversation: Conversation? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // Global Mutex to serialise the entire conversation lifecycle.
@@ -306,7 +307,11 @@ class LlamaModel(
      * @return The conversation instance, or null if creation fails
      */
     private fun createConversation(config: GenerationConfig): Conversation? {
-        return try {
+        if (null != conversation) {
+            return conversation
+        }
+
+        conversation = try {
             val currentEngine = engine
                 ?: throw IllegalStateException("Engine is not initialized")
 
@@ -327,6 +332,7 @@ class LlamaModel(
             LogManager.e(TAG, "Failed to create conversation: ${e.message}")
             null
         }
+        return conversation
     }
 
     /**
