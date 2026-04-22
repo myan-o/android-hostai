@@ -556,7 +556,6 @@ class LlamaModel(
                                                 fullResponse.append(message.toString())
                                             }
                                         }
-                                        fullResponse.append(token)
                                         onToken(token)
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Token callback error (client may have disconnected): ${e.message}")
