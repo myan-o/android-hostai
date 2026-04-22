@@ -3,8 +3,11 @@ package com.wannaphong.hostai
 import android.content.Context
 import android.util.Base64
 import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Message
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.reflect.TypeToken
 import io.javalin.Javalin
@@ -427,11 +430,11 @@ class OpenAIApiServer(
         bodyText: String
     ) {
         // Generate response with session ID - handle both String and multimodal content
+        val history = buildMessagesFromOpenAI(messages)
         val completion = if (contents is String) {
-            model.generate(contents, config, sessionId)
+            model.generate(contents, config, sessionId, buildMessagesFromOpenAI(messages))
         } else {
-            @Suppress("UNCHECKED_CAST")
-            model.generateWithContents(contents as List<Content>, config, sessionId)
+            model.generateWithContents(buildMessagesFromOpenAI(messages), config, sessionId)
         }
         
         val promptTokens = when (contents) {
@@ -566,8 +569,9 @@ class OpenAIApiServer(
         try {
             var tokenCount = 0
             
-            val job = if (contents is String) {
-                model.generateStream(contents, config, sessionId) { token ->
+        val history = buildMessagesFromOpenAI(messages)
+        val job = if (contents is String) {
+            model.generateStream(contents, config, sessionId, history) { token ->
                     try {
                         tokenCount++
                         
@@ -608,8 +612,7 @@ class OpenAIApiServer(
             }
             } else {
                 // Multimodal streaming
-                @Suppress("UNCHECKED_CAST")
-                model.generateStreamWithContents(contents as List<Content>, config, sessionId) { token ->
+                model.generateStreamWithContents(buildMessagesFromOpenAI(messages), config, sessionId) { token ->
                     try {
                         tokenCount++
                         
@@ -979,6 +982,28 @@ class OpenAIApiServer(
         // Note: Javalin manages the output stream lifecycle; don't close it manually
     }
     
+    private fun buildMessagesFromOpenAI(messages: JsonArray): List<Message> {
+        return messages.map { element ->
+            val obj = element.asJsonObject
+            val role = obj.get("role")?.asString ?: ""
+            val content = obj.get("content")
+
+            val contents = when {
+                content == null -> Contents.of("")
+                content.isJsonPrimitive -> Contents.of(content.asString)
+                content.isJsonArray -> Contents.of(parseMultimodalContentToObjects(content.asJsonArray))
+                else -> Contents.of(content.toString())
+            }
+
+            when (role) {
+                "user" -> Message.user(contents)
+                "assistant" -> Message.model(contents)
+                "system" -> Message.system(contents)
+                else -> Message.user(contents)
+            }
+        }
+    }
+
     /**
      * Build prompt from messages with multimodal support.
      * Returns either a simple String prompt or a List of Content objects for multimodal inputs.

@@ -62,6 +62,8 @@ class LlamaModel(
     // LiteRT components
     @Volatile private var engine: Engine? = null
     @Volatile private var _conversation: Conversation? = null
+    private var currentSessionId: String? = null
+    private var currentFullHistory: List<Message>? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // Global Mutex to serialise the entire conversation lifecycle.
@@ -306,10 +308,14 @@ class LlamaModel(
      * @param config Sampler configuration for the conversation
      * @return The conversation instance, or null if creation fails
      */
-    private fun createConversation(config: GenerationConfig): Conversation? {
-        if (null != _conversation) {
+    private fun createConversation(config: GenerationConfig, sessionId: String, history: List<Message>): Conversation? {
+        if (_conversation != null && currentSessionId == sessionId && currentFullHistory == history) {
             return _conversation
         }
+
+        _conversation?.close()
+        currentSessionId = sessionId
+        currentFullHistory = history
 
         _conversation = try {
             val currentEngine = engine
@@ -323,7 +329,7 @@ class LlamaModel(
 
             val conversationConfig = ConversationConfig(
                 systemInstruction = null,
-                initialMessages = emptyList(),
+                initialMessages = history,
                 samplerConfig = samplerConfig
             )
 
@@ -342,7 +348,7 @@ class LlamaModel(
      * @param sessionId Unused – kept for API compatibility
      * @return Generated text
      */
-    fun generate(prompt: String, config: GenerationConfig = GenerationConfig(), sessionId: String = ""): String {
+    fun generate(prompt: String, config: GenerationConfig = GenerationConfig(), sessionId: String = "", history: List<Message> = emptyList()): String {
         if (!isModelLoaded()) {
             val errorMsg = "Error: Model not loaded. Please load a model first."
             LogManager.e(TAG, errorMsg)
@@ -374,7 +380,7 @@ class LlamaModel(
                 inferenceMutex.mutexWithLock {
                     var conversation: Conversation? = null
                     try {
-                        conversation = createConversation(config)
+                        conversation = createConversation(config, sessionId, history)
 
                         if (conversation == null) {
                             val errorMsg = "Error: Failed to create conversation"
@@ -386,6 +392,7 @@ class LlamaModel(
                         val userMessage = Message.user(prompt)
                         val response = conversation.sendMessage(userMessage, config.chatTemplateKwArgs)
                         val result = response.toString()
+                        currentFullHistory = (currentFullHistory ?: emptyList()) + userMessage + Message.model(result)
                         LogManager.i(TAG, "Generation completed successfully (length: ${result.length})")
                         result
                     } catch (e: Exception) {
@@ -401,29 +408,26 @@ class LlamaModel(
 
     /**
      * Generate text with multimodal content support (images, audio).
-     * @param contents List of Content objects (text, images, audio)
+     * @param messages List of Message objects
      * @param config Generation configuration with all parameters (optional)
      * @param sessionId Unused – kept for API compatibility
      * @return Generated text
      */
-    fun generateWithContents(contents: List<Content>, config: GenerationConfig = GenerationConfig(), sessionId: String = ""): String {
+    fun generateWithContents(messages: List<Message>, config: GenerationConfig = GenerationConfig(), sessionId: String = ""): String {
         if (!isModelLoaded()) {
             val errorMsg = "Error: Model not loaded. Please load a model first."
             LogManager.e(TAG, errorMsg)
             return errorMsg
         }
 
-        LogManager.i(TAG, "Generating multimodal response with ${contents.size} content parts")
+        LogManager.i(TAG, "Generating multimodal response with ${messages.size} messages")
         LogManager.d(TAG, "Config: maxTokens=${config.maxTokens}, temp=${config.temperature}, topK=${config.topK}, topP=${config.topP}")
 
-        // For mock model, return a simple response
         if (modelPath == "mock-model") {
-            return "This is a mock multimodal response from the model with ${contents.size} content parts."
+            return "This is a mock multimodal response from the model with ${messages.size} messages."
         }
 
         return engineLifecycleLock.read {
-            // Re-check inside the lock: close() sets isLoaded = false while holding the write
-            // lock, so if we reach here after close() completed, we see the updated value.
             if (!isLoaded) {
                 return@read "Error: Model not loaded. Please load a model first."
             }
@@ -431,7 +435,10 @@ class LlamaModel(
                 inferenceMutex.mutexWithLock {
                     var conversation: Conversation? = null
                     try {
-                        conversation = createConversation(config)
+                        val history = messages.dropLast(1)
+                        val userMessage = messages.last()
+
+                        conversation = createConversation(config, sessionId, history)
 
                         if (conversation == null) {
                             val errorMsg = "Error: Failed to create conversation"
@@ -439,10 +446,9 @@ class LlamaModel(
                             return@mutexWithLock errorMsg
                         }
 
-                        // Send message with multimodal contents and get response synchronously
-                        val userMessage = Message.user(Contents.of(contents))
                         val response = conversation.sendMessage(userMessage, config.chatTemplateKwArgs)
                         val result = response.toString()
+                        currentFullHistory = (currentFullHistory ?: emptyList()) + userMessage + Message.model(result)
                         LogManager.i(TAG, "Multimodal generation completed successfully (length: ${result.length})")
                         result
                     } catch (e: Exception) {
@@ -477,6 +483,7 @@ class LlamaModel(
         prompt: String,
         config: GenerationConfig = GenerationConfig(),
         sessionId: String = "",
+        history: List<Message> = emptyList(),
         onToken: (String) -> Unit
     ): Job? {
         if (!isModelLoaded()) {
@@ -507,7 +514,7 @@ class LlamaModel(
                 inferenceMutex.mutexWithLock {
                     var conversation: Conversation? = null
                     try {
-                        conversation = createConversation(config)
+                        conversation = createConversation(config, sessionId, history)
 
                         if (conversation == null) {
                             LogManager.e(TAG, "Failed to create conversation")
@@ -515,7 +522,8 @@ class LlamaModel(
                             return@mutexWithLock
                         }
 
-                        // Use suspendCancellableCoroutine to bridge the async callback with coroutines.
+                        val userMessage = Message.user(prompt)
+                        val fullResponse = StringBuilder()
                         suspendCancellableCoroutine<Unit> { continuation ->
                             val resumed = AtomicBoolean(false)
                             val in_think = AtomicBoolean(false)
@@ -546,6 +554,7 @@ class LlamaModel(
                                                 token = message.toString()
                                             }
                                         }
+                                        fullResponse.append(token)
                                         onToken(token)
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Token callback error (client may have disconnected): ${e.message}")
@@ -571,9 +580,9 @@ class LlamaModel(
                                 }
                             }
 
-                            val userMessage = Message.user(prompt)
                             conversation.sendMessageAsync(userMessage, callback, config.chatTemplateKwArgs)
                         }
+                        currentFullHistory = (currentFullHistory ?: emptyList()) + userMessage + Message.model(fullResponse.toString())
                     } catch (e: Exception) {
                         Log.e(TAG, "Streaming failed", e)
                         LogManager.e(TAG, "Streaming failed: ${e.message}", e)
@@ -589,14 +598,14 @@ class LlamaModel(
 
     /**
      * Generate text with streaming and multimodal content support (images, audio).
-     * @param contents List of Content objects (text, images, audio)
+     * @param messages List of Message objects
      * @param config Generation configuration with all parameters (optional)
      * @param sessionId Unused – kept for API compatibility
      * @param onToken Callback for each generated token
      * @return Job that can be cancelled, or null on error
      */
     fun generateStreamWithContents(
-        contents: List<Content>,
+        messages: List<Message>,
         config: GenerationConfig = GenerationConfig(),
         sessionId: String = "",
         onToken: (String) -> Unit
@@ -606,12 +615,12 @@ class LlamaModel(
             return null
         }
 
-        LogManager.d(TAG, "Streaming multimodal with ${contents.size} content parts - config: maxTokens=${config.maxTokens}, temp=${config.temperature}, topK=${config.topK}, topP=${config.topP}")
+        LogManager.d(TAG, "Streaming multimodal with ${messages.size} messages - config: maxTokens=${config.maxTokens}, temp=${config.temperature}, topK=${config.topK}, topP=${config.topP}")
 
         // For mock model, simulate streaming
         if (modelPath == "mock-model") {
             return scope.launch {
-                val mockResponse = "This is a mock multimodal streaming response from the model with ${contents.size} content parts. "
+                val mockResponse = "This is a mock multimodal streaming response from the model with ${messages.size} messages. "
                 onToken(mockResponse)
             }
         }
@@ -629,7 +638,9 @@ class LlamaModel(
                 inferenceMutex.mutexWithLock {
                     var conversation: Conversation? = null
                     try {
-                        conversation = createConversation(config)
+                        val history = if (messages.size > 1) messages.subList(0, messages.size - 1) else emptyList()
+                        val lastMessage = messages.last()
+                        conversation = createConversation(config, sessionId, history)
 
                         if (conversation == null) {
                             LogManager.e(TAG, "Failed to create conversation")
@@ -637,6 +648,7 @@ class LlamaModel(
                             return@mutexWithLock
                         }
 
+                        val fullResponse = StringBuilder()
                         suspendCancellableCoroutine<Unit> { continuation ->
                             val resumed = AtomicBoolean(false)
                             val in_think = AtomicBoolean(false)
@@ -666,6 +678,7 @@ class LlamaModel(
                                                 token = message.toString()
                                             }
                                         }
+                                        fullResponse.append(token)
                                         onToken(token)
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Multimodal token callback error (client may have disconnected): ${e.message}")
@@ -691,9 +704,9 @@ class LlamaModel(
                                 }
                             }
 
-                            val userMessage = Message.user(Contents.of(contents))
-                            conversation.sendMessageAsync(userMessage, callback, config.chatTemplateKwArgs)
+                            conversation.sendMessageAsync(lastMessage, callback, config.chatTemplateKwArgs)
                         }
+                        currentFullHistory = (currentFullHistory ?: emptyList()) + lastMessage + Message.model(fullResponse.toString())
                     } catch (e: Exception) {
                         Log.e(TAG, "Multimodal streaming failed", e)
                         LogManager.e(TAG, "Multimodal streaming failed: ${e.message}", e)
@@ -718,7 +731,7 @@ class LlamaModel(
         temperature: Float = 0.7f,
         onToken: (String) -> Unit
     ): Job? {
-        return generateStream(prompt, GenerationConfig(maxTokens = maxTokens, temperature = temperature.toDouble()), "", onToken)
+        return generateStream(prompt, GenerationConfig(maxTokens = maxTokens, temperature = temperature.toDouble()), "", emptyList(), onToken)
     }
 
     /**
