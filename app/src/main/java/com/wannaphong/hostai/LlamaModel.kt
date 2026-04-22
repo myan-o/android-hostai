@@ -540,6 +540,7 @@ class LlamaModel(
                                             if (null == message.channels["thought"]) {
                                                 in_think.set(false)
                                                 token = "\n</think>\n" + message.toString()
+                                                fullResponse.append(message.toString())
                                             }
                                             else {
                                                 token = message.channels["thought"] ?: ""
@@ -552,6 +553,7 @@ class LlamaModel(
                                             }
                                             else {
                                                 token = message.toString()
+                                                fullResponse.append(message.toString())
                                             }
                                         }
                                         fullResponse.append(token)
@@ -664,6 +666,7 @@ class LlamaModel(
                                             if (null == message.channels["thought"]) {
                                                 in_think.set(false)
                                                 token = "\n</think>\n" + message.toString()
+                                                fullResponse.append(message.toString())
                                             }
                                             else {
                                                 token = message.channels["thought"] ?: ""
@@ -676,9 +679,9 @@ class LlamaModel(
                                             }
                                             else {
                                                 token = message.toString()
+                                                fullResponse.append(message.toString())
                                             }
                                         }
-                                        fullResponse.append(token)
                                         onToken(token)
                                     } catch (e: Exception) {
                                         LogManager.w(TAG, "Multimodal token callback error (client may have disconnected): ${e.message}")
