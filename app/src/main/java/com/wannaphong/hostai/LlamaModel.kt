@@ -309,8 +309,11 @@ class LlamaModel(
      * @return The conversation instance, or null if creation fails
      */
     private fun createConversation(config: GenerationConfig, sessionId: String, history: List<Message>): Conversation? {
-        if (_conversation != null && currentSessionId == sessionId && currentFullHistory == history) {
-            return _conversation
+
+        if (_conversation != null) {
+            if (currentFullHistory.size() == history.size()) {
+                return _conversation
+            }
         }
 
         _conversation?.close()

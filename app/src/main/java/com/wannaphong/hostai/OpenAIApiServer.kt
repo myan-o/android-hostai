@@ -385,8 +385,8 @@ class OpenAIApiServer(
             val config = extractGenerationConfig(request)
 
             // Log preview
-            val firstMessage = messages.getOrNull(0)?.asJsonObject?.get("content")?.asString ?: ""
-            LogManager.d(TAG, "Request received with ${messages.size} messages. First message preview: ${firstMessage.take(100)}")
+            val firstMessage = messages.get(0).asJsonObject.get("content")?.asString ?: ""
+            LogManager.d(TAG, "Request received with ${messages.size()} messages. First message preview: ${firstMessage.take(100)}")
             LogManager.d(TAG, "Chat completion - stream: $stream, maxTokens: ${config.maxTokens}, temp: ${config.temperature}")
 
             // Acquire a permit before running inference. If max concurrency is reached the
