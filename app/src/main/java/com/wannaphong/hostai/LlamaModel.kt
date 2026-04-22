@@ -583,7 +583,7 @@ class LlamaModel(
 
                             conversation.sendMessageAsync(userMessage, callback, config.chatTemplateKwArgs)
                         }
-                        currentFullHistory = (currentFullHistory ?: emptyList()) + userMessage + Message.model(fullResponse.toString())
+                        currentFullHistory = (currentFullHistory ?: emptyList()) + userMessage + Message.model(fullResponse.toString().trim())
                     } catch (e: Exception) {
                         Log.e(TAG, "Streaming failed", e)
                         LogManager.e(TAG, "Streaming failed: ${e.message}", e)
@@ -708,7 +708,7 @@ class LlamaModel(
 
                             conversation.sendMessageAsync(lastMessage, callback, config.chatTemplateKwArgs)
                         }
-                        currentFullHistory = (currentFullHistory ?: emptyList()) + lastMessage + Message.model(fullResponse.toString())
+                        currentFullHistory = (currentFullHistory ?: emptyList()) + lastMessage + Message.model(fullResponse.toString().trim())
                     } catch (e: Exception) {
                         Log.e(TAG, "Multimodal streaming failed", e)
                         LogManager.e(TAG, "Multimodal streaming failed: ${e.message}", e)
