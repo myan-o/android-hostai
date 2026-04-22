@@ -311,7 +311,7 @@ class LlamaModel(
     private fun createConversation(config: GenerationConfig, sessionId: String, history: List<Message>): Conversation? {
 
         if (_conversation != null) {
-            if (currentFullHistory.size() == history.size()) {
+            if (currentFullHistory?.size == history?.size) {
                 return _conversation
             }
         }
