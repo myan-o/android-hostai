@@ -539,24 +539,22 @@ class LlamaModel(
                                     // they will crash the native engine / the Android process.
                                     try {
                                         var token = ""
-                                        if (in_think.get()) {
-                                            if (null == message.channels["thought"]) {
-                                                in_think.set(false)
+                                        if (null == message.channels["thought"]) {
+                                            if (in_think.compareAndSet(false, true)) {
+                                                token = message.toString()
+                                                fullResponse.append(message.toString())
+                                            }
+                                            else {
                                                 token = "\n</think>\n" + message.toString()
                                                 fullResponse.append(message.toString())
                                             }
-                                            else {
-                                                token = message.channels["thought"] ?: ""
-                                            }
                                         }
                                         else {
-                                            if (null != message.channels["thought"]) {
-                                                in_think.set(true)
+                                            if (in_think.compareAndSet(false, true)) {
                                                 token = "<think>\n" + message.channels["thought"]
                                             }
                                             else {
-                                                token = message.toString()
-                                                fullResponse.append(message.toString())
+                                                token = message.channels["thought"] ?: ""
                                             }
                                         }
                                         onToken(token)
@@ -664,24 +662,22 @@ class LlamaModel(
                                     // they will crash the native engine / the Android process.
                                     try {
                                         var token = ""
-                                        if (in_think.get()) {
-                                            if (null == message.channels["thought"]) {
-                                                in_think.set(false)
+                                        if (null == message.channels["thought"]) {
+                                            if (in_think.compareAndSet(false, true)) {
+                                                token = message.toString()
+                                                fullResponse.append(message.toString())
+                                            }
+                                            else {
                                                 token = "\n</think>\n" + message.toString()
                                                 fullResponse.append(message.toString())
                                             }
-                                            else {
-                                                token = message.channels["thought"] ?: ""
-                                            }
                                         }
                                         else {
-                                            if (null != message.channels["thought"]) {
-                                                in_think.set(true)
+                                            if (in_think.compareAndSet(false, true)) {
                                                 token = "<think>\n" + message.channels["thought"]
                                             }
                                             else {
-                                                token = message.toString()
-                                                fullResponse.append(message.toString())
+                                                token = message.channels["thought"] ?: ""
                                             }
                                         }
                                         onToken(token)
