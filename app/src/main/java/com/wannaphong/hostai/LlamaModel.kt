@@ -780,11 +780,22 @@ class LlamaModel(
      */
     fun close() {
         LogManager.i(TAG, "Closing model and releasing resources")
-        // The write lock waits for all current read-lock holders (in-flight
-        // generate / generateWithContents calls) to complete before proceeding.
-        engineLifecycleLock.write {
-            isLoaded = false
-            cleanup(closeEngine = true)
+
+        // 1. Immediately mark as not loaded to prevent new requests from starting
+        isLoaded = false
+
+        // 2. Perform the actual cleanup asynchronously to avoid blocking the caller
+        // (especially since engineLifecycleLock.write blocks until all read locks are released)
+        scope.launch {
+            try {
+                LogManager.d(TAG, "Waiting for in-flight inferences to complete before native close...")
+                engineLifecycleLock.write {
+                    cleanup(closeEngine = true)
+                    LogManager.i(TAG, "Native engine closed successfully")
+                }
+            } catch (e: Exception) {
+                LogManager.e(TAG, "Error during asynchronous close: ${e.message}", e)
+            }
         }
     }
 }
