@@ -9,7 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -25,6 +27,20 @@ class ApiServerService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var isRunning = false
     private var currentPort: Int = DEFAULT_PORT
+
+    private val heartbeatHandler = Handler(Looper.getMainLooper())
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            if (isRunning) {
+                LogManager.d(TAG, "Heartbeat: API Server is still running and active")
+
+                // Update notification to signal activity to the OS
+                updateNotificationHeartbeat()
+
+                heartbeatHandler.postDelayed(this, 10000) // Every 10 seconds
+            }
+        }
+    }
     
     companion object {
         private const val TAG = "ApiServerService"
@@ -72,11 +88,11 @@ class ApiServerService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.notification_channel_name),
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = getString(R.string.notification_channel_desc)
             }
-            
+
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
         }
@@ -132,9 +148,12 @@ class ApiServerService : Service() {
             apiServer = OpenAIApiServer(port, llamaModel, this)
             apiServer?.start()
             isRunning = true
-            
+
+            // Start heartbeat to prevent OS from thinking service is idle
+            heartbeatHandler.post(heartbeatRunnable)
+
             LogManager.i(TAG, "API server started successfully")
-            
+
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start server", e)
@@ -153,6 +172,9 @@ class ApiServerService : Service() {
     fun stopServer() {
         LogManager.i(TAG, "Stopping API server")
 
+        // Stop heartbeat
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
+
         // Release WakeLock
         wakeLock?.let {
             if (it.isHeld) {
@@ -170,6 +192,20 @@ class ApiServerService : Service() {
         LogManager.i(TAG, "API server stopped")
     }
     
+    private fun updateNotificationHeartbeat() {
+        try {
+            val port = currentPort
+            val now = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+            val text = "${getString(R.string.notification_text, "http://localhost:$port")} (Last active: $now)"
+            val notification = createNotification(port, text)
+
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            LogManager.w(TAG, "Error updating heartbeat notification: ${e.message}")
+        }
+    }
+
     fun isServerRunning(): Boolean = isRunning
     
     fun getServerPort(): Int = currentPort
@@ -178,7 +214,7 @@ class ApiServerService : Service() {
     
     fun getApiServer(): OpenAIApiServer? = apiServer
     
-    private fun createNotification(port: Int): Notification {
+    private fun createNotification(port: Int, customText: String? = null): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -186,7 +222,7 @@ class ApiServerService : Service() {
             intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        
+
         // Create stop action for notification
         val stopIntent = Intent(this, ApiServerService::class.java).apply {
             action = ACTION_STOP_FROM_NOTIFICATION
@@ -197,13 +233,17 @@ class ApiServerService : Service() {
             stopIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        
+
+        val contentText = customText ?: getString(R.string.notification_text, "http://localhost:$port")
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
-            .setContentText(getString(R.string.notification_text, "http://localhost:$port"))
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 getString(R.string.notification_stop_action),
