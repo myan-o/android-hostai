@@ -9,12 +9,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.*
 
 /**
  * Foreground service that runs the OpenAI-compatible API server.
@@ -28,19 +27,8 @@ class ApiServerService : Service() {
     private var isRunning = false
     private var currentPort: Int = DEFAULT_PORT
 
-    private val heartbeatHandler = Handler(Looper.getMainLooper())
-    private val heartbeatRunnable = object : Runnable {
-        override fun run() {
-            if (isRunning) {
-                LogManager.d(TAG, "Heartbeat: API Server is still running and active")
-
-                // Update notification to signal activity to the OS
-                updateNotificationHeartbeat()
-
-                heartbeatHandler.postDelayed(this, 10000) // Every 10 seconds
-            }
-        }
-    }
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var heartbeatJob: Job? = null
     
     companion object {
         private const val TAG = "ApiServerService"
@@ -150,7 +138,14 @@ class ApiServerService : Service() {
             isRunning = true
 
             // Start heartbeat to prevent OS from thinking service is idle
-            heartbeatHandler.post(heartbeatRunnable)
+            LogManager.i(TAG, "Starting heartbeat coroutine...")
+            heartbeatJob = serviceScope.launch {
+                while (isActive && isRunning) {
+                    updateNotificationHeartbeat()
+                    LogManager.d(TAG, "Heartbeat: Notification updated")
+                    delay(10000)
+                }
+            }
 
             LogManager.i(TAG, "API server started successfully")
 
@@ -173,7 +168,9 @@ class ApiServerService : Service() {
         LogManager.i(TAG, "Stopping API server")
 
         // Stop heartbeat
-        heartbeatHandler.removeCallbacks(heartbeatRunnable)
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        LogManager.i(TAG, "Heartbeat job cancelled")
 
         // Release WakeLock
         wakeLock?.let {
@@ -255,5 +252,7 @@ class ApiServerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopServer()
+        serviceScope.cancel()
+        LogManager.i(TAG, "Service scope cancelled")
     }
 }
