@@ -27,7 +27,7 @@ class ApiServerService : Service() {
     private var isRunning = false
     private var currentPort: Int = DEFAULT_PORT
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var heartbeatJob: Job? = null
     
     companion object {
