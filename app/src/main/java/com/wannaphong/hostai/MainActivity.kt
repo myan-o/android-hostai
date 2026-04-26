@@ -16,10 +16,12 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.PowerManager
 import android.provider.OpenableColumns
 import android.text.format.Formatter
 import android.view.View
 import android.widget.Toast
+import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -77,7 +79,7 @@ class MainActivity : AppCompatActivity() {
     ) { isGranted ->
         if (isGranted) {
             LogManager.i("MainActivity", "Notification permission granted")
-            proceedToStartServer()
+            checkBatteryOptimizations()
         } else {
             LogManager.w("MainActivity", "Notification permission denied")
             Toast.makeText(
@@ -87,7 +89,14 @@ class MainActivity : AppCompatActivity() {
             ).show()
         }
     }
-    
+
+    private val batteryOptimizationLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        LogManager.i("MainActivity", "Battery optimization request returned")
+        proceedToStartServer()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -220,14 +229,37 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             // No permission needed for older Android versions
-            proceedToStartServer()
+            checkBatteryOptimizations()
         }
     }
     
     private fun requestNotificationPermission() {
         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-    
+
+    private fun checkBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                LogManager.i("MainActivity", "App is not ignoring battery optimizations, requesting now")
+
+                // Create a simple explanation for the user
+                Toast.makeText(
+                    this,
+                    "To keep the server running in the background, please disable battery optimization for this app.",
+                    Toast.LENGTH_LONG
+                ).show()
+
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                batteryOptimizationLauncher.launch(intent)
+                return
+            }
+        }
+        proceedToStartServer()
+    }
+
     private fun proceedToStartServer() {
         LogManager.i("MainActivity", "Proceeding to start server")
         
