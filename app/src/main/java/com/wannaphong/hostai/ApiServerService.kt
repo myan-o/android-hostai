@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
@@ -21,6 +22,7 @@ class ApiServerService : Service() {
     private val binder = LocalBinder()
     private var apiServer: OpenAIApiServer? = null
     private var model: LlamaModel? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private var isRunning = false
     private var currentPort: Int = DEFAULT_PORT
     
@@ -96,6 +98,13 @@ class ApiServerService : Service() {
             val notification = createNotification(port)
             startForeground(NOTIFICATION_ID, notification)
             LogManager.i(TAG, "Foreground service started successfully")
+
+            // Acquire WakeLock to prevent CPU from sleeping while server is running
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$TAG:WakeLock").apply {
+                acquire()
+            }
+            LogManager.i(TAG, "WakeLock acquired")
         } catch (e: Exception) {
             // If we can't even start foreground, we should fail immediately
             Log.e(TAG, "Failed to start foreground service", e)
@@ -143,6 +152,16 @@ class ApiServerService : Service() {
     
     fun stopServer() {
         LogManager.i(TAG, "Stopping API server")
+
+        // Release WakeLock
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+                LogManager.i(TAG, "WakeLock released")
+            }
+        }
+        wakeLock = null
+
         apiServer?.stop()
         model?.close()  // Explicitly close to free native resources
         apiServer = null
