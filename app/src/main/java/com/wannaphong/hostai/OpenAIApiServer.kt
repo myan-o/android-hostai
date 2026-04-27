@@ -975,12 +975,12 @@ class OpenAIApiServer(
                             LogManager.i(TAG, "Multimodal: Decoded base64 image (${imageBytes.size} bytes, detail=$detail)")
                         } catch (e: Exception) {
                             LogManager.e(TAG, "Failed to decode base64 image", e)
-                            contents.add(Content.Text("\n[Error decoding image: ${e.message}]\n"))
+                            throw IllegalArgumentException("Failed to decode base64 image: ${e.message}")
                         }
                     } else {
                         // Image URLs not directly supported - would need to fetch the image
                         LogManager.w(TAG, "Multimodal: Image URLs not supported yet, only base64 encoded images: $url")
-                        contents.add(Content.Text("\n[Image URL not supported: $url (use base64 encoding instead)]\n"))
+                        throw IllegalArgumentException("Image URLs not supported. Please use base64 encoded images (data:image/...;base64,...)")
                     }
                 }
                 "input_audio" -> {
@@ -995,11 +995,11 @@ class OpenAIApiServer(
                             LogManager.i(TAG, "Multimodal: Decoded audio data (${audioBytes.size} bytes, format=$format)")
                         } catch (e: Exception) {
                             LogManager.e(TAG, "Failed to decode audio data", e)
-                            contents.add(Content.Text("\n[Error decoding audio: ${e.message}]\n"))
+                            throw IllegalArgumentException("Failed to decode base64 audio data: ${e.message}")
                         }
                     } else {
                         LogManager.w(TAG, "Multimodal: Audio input missing data field")
-                        contents.add(Content.Text("\n[Audio input missing data]\n"))
+                        throw IllegalArgumentException("Audio input missing data field")
                     }
                 }
                 else -> {

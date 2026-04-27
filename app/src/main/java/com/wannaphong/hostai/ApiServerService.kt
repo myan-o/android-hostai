@@ -13,7 +13,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.*
 
 /**
  * Foreground service that runs the OpenAI-compatible API server.
@@ -26,9 +25,6 @@ class ApiServerService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var isRunning = false
     private var currentPort: Int = DEFAULT_PORT
-
-    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var heartbeatJob: Job? = null
     
     companion object {
         private const val TAG = "ApiServerService"
@@ -137,16 +133,6 @@ class ApiServerService : Service() {
             apiServer?.start()
             isRunning = true
 
-            // Start heartbeat to prevent OS from thinking service is idle
-            LogManager.i(TAG, "Starting heartbeat coroutine...")
-            heartbeatJob = serviceScope.launch {
-                while (isActive && isRunning) {
-                    updateNotificationHeartbeat()
-                    LogManager.d(TAG, "Heartbeat: Notification updated")
-                    delay(10000)
-                }
-            }
-
             LogManager.i(TAG, "API server started successfully")
 
             true
@@ -167,11 +153,6 @@ class ApiServerService : Service() {
     fun stopServer() {
         LogManager.i(TAG, "Stopping API server")
 
-        // Stop heartbeat
-        heartbeatJob?.cancel()
-        heartbeatJob = null
-        LogManager.i(TAG, "Heartbeat job cancelled")
-
         // Release WakeLock
         wakeLock?.let {
             if (it.isHeld) {
@@ -189,20 +170,6 @@ class ApiServerService : Service() {
         LogManager.i(TAG, "API server stopped")
     }
     
-    private fun updateNotificationHeartbeat() {
-        try {
-            val port = currentPort
-            val now = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-            val text = "${getString(R.string.notification_text, "http://localhost:$port")} (Last active: $now)"
-            val notification = createNotification(port, text)
-
-            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.notify(NOTIFICATION_ID, notification)
-        } catch (e: Exception) {
-            LogManager.w(TAG, "Error updating heartbeat notification: ${e.message}")
-        }
-    }
-
     fun isServerRunning(): Boolean = isRunning
     
     fun getServerPort(): Int = currentPort
@@ -252,7 +219,5 @@ class ApiServerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopServer()
-        serviceScope.cancel()
-        LogManager.i(TAG, "Service scope cancelled")
     }
 }
