@@ -220,9 +220,10 @@ class LlamaModel(
         return try {
             LogManager.i(TAG, "Initializing LiteRT with model: $modelName")
 
-            // Enable MTP via speculative decoding
-            @OptIn(ExperimentalApi::class)
-            ExperimentalFlags.enableSpeculativeDecoding = true
+             // Enable MTP via speculative decoding
+             @OptIn(ExperimentalApi::class)
+             ExperimentalFlags.enableSpeculativeDecoding = settingsManager.isSpeculativeDecodingEnabled()
+
 
             // Get backend preference from settings
             val backend = when (settingsManager.getBackend()) {
