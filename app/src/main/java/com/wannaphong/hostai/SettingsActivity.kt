@@ -45,6 +45,7 @@ class SettingsActivity : AppCompatActivity() {
         binding.webChatSwitch.isChecked = settingsManager.isWebChatEnabled()
         binding.textCompletionsSwitch.isChecked = settingsManager.isTextCompletionsEnabled()
         binding.chatCompletionsSwitch.isChecked = settingsManager.isChatCompletionsEnabled()
+        binding.speculativeDecodingSwitch.isChecked = settingsManager.isSpeculativeDecodingEnabled()
         
         // Load logging setting
         binding.loggingSwitch.isChecked = settingsManager.isLoggingEnabled()
@@ -148,6 +149,7 @@ class SettingsActivity : AppCompatActivity() {
         settingsManager.setWebChatEnabled(binding.webChatSwitch.isChecked)
         settingsManager.setTextCompletionsEnabled(binding.textCompletionsSwitch.isChecked)
         settingsManager.setChatCompletionsEnabled(binding.chatCompletionsSwitch.isChecked)
+        settingsManager.setSpeculativeDecodingEnabled(binding.speculativeDecodingSwitch.isChecked)
         
         // Save logging setting
         settingsManager.setLoggingEnabled(binding.loggingSwitch.isChecked)

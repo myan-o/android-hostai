@@ -21,6 +21,7 @@ class SettingsManager(context: Context) {
         private const val KEY_MAX_CONCURRENCY = "max_concurrency"
         private const val KEY_MAX_CONTEXT_LENGTH = "max_context_length"
         private const val KEY_MULTIMODAL_ENABLED = "multimodal_enabled"
+        private const val KEY_SPECULATIVE_DECODING_ENABLED = "speculative_decoding_enabled"
 
         const val BACKEND_CPU = "cpu"
         const val BACKEND_GPU = "gpu"
@@ -99,6 +100,19 @@ class SettingsManager(context: Context) {
      */
     fun setLoggingEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_LOGGING_ENABLED, enabled).apply()
+    }
+    /**
+     * Check if speculative decoding is enabled (default: false)
+     */
+    fun isSpeculativeDecodingEnabled(): Boolean {
+        return prefs.getBoolean(KEY_SPECULATIVE_DECODING_ENABLED, false)
+    }
+    
+    /**
+     * Set speculative decoding enabled state
+     */
+    fun setSpeculativeDecodingEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SPECULATIVE_DECODING_ENABLED, enabled).apply()
     }
     
     /**
