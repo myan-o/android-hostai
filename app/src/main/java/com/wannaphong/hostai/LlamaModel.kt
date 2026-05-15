@@ -5,6 +5,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
@@ -217,6 +219,10 @@ class LlamaModel(
     private fun loadFromPath(enginePath: String): Boolean {
         return try {
             LogManager.i(TAG, "Initializing LiteRT with model: $modelName")
+
+            // Enable MTP via speculative decoding
+            @OptIn(ExperimentalApi::class)
+            ExperimentalFlags.enableSpeculativeDecoding = true
 
             // Get backend preference from settings
             val backend = when (settingsManager.getBackend()) {
